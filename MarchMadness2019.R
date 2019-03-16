@@ -30,6 +30,7 @@ dat <-
                         read_csv(
                             str_c(
                                 path,
+                                "/",
                                 .x
                             )
                         )
@@ -45,6 +46,145 @@ dat <-
     map(
         bind_rows,
         .id = "Tournament"
+    )
+
+#####Make a lookup table of regular season statistics for each team
+#Get a frame of unique teams per season
+teams_reg_season <- 
+    dat$RegularSeasonDetailedResults %>%
+    select(
+        Tournament,
+        Season,
+        DayNum,
+        WTeamID,
+        LTeamID
+    ) %>%
+    
+    #Gather to key value pairs
+    gather(
+        key = "key",
+        value = "TeamID",
+        -Tournament,
+        -Season,
+        -DayNum
+    ) %>%
+    select(-key, -DayNum) %>%
+    distinct()
+
+#Join to get stats when team is winning
+teams_reg_season %>%
+    inner_join(
+        y = 
+            dat$RegularSeasonDetailedResults %>%
+            select(
+                -DayNum,
+                -WLoc,
+                -NumOT
+            ) %>%
+            
+            #Remove leading letter for winning team
+            rename_at(
+                vars(
+                    matches("^W")
+                ),
+                str_remove,
+                pattern = "^W"
+            ) %>%
+            
+            #Replace leading letter of losing team with 'O'
+            rename_at(
+                vars(
+                    matches("^L")
+                ),
+                str_replace,
+                pattern = "^L",
+                replacement = "O"
+            ),
+        
+        by = 
+            c(
+                "Tournament",
+                "Season",
+                "TeamID"
+            )
+    ) %>%
+    
+    #Bind with all losing games
+    bind_rows(
+        teams_reg_season %>%
+            inner_join(
+                y = 
+                    dat$RegularSeasonDetailedResults %>%
+                    select(
+                        -DayNum,
+                        -WLoc,
+                        -NumOT
+                    ) %>%
+                    
+                    #Remove leading letter
+                    rename_at(
+                        vars(
+                            matches("^L")
+                        ),
+                        str_remove,
+                        pattern = "^L"
+                    ) %>%
+                    
+                    #Replace leading letter of losing team with 'O'
+                    rename_at(
+                        vars(
+                            matches("^W")
+                        ),
+                        str_replace,
+                        pattern = "^W",
+                        replacement = "O"
+                    ),
+                
+                by = 
+                    c(
+                        "Tournament",
+                        "Season",
+                        "TeamID"
+                    )
+            ) 
+    ) %>%
+    select(-OTeamID) %>%
+    
+    #Compute new statistics
+    #Possestions = field goals attempted - offensive rebounds + turnovers + (0.4 x free throws attempted) 
+    mutate(
+        Poss = FGA - OR + TO + .4*FTA,
+        OPoss = OFGA - OOR + OTO + .4*OFTA,
+        PPP = Score/Poss,
+        OPPP = OScore/Poss,
+        PointDifferential = Score - OScore,
+        Win = Score > OScore,
+        FTP = FTM/FTA,
+        OFTP = OFTM/OFTA,
+        FGP = FGM/FGA,
+        OFGP = OFGM/OFGA
+    ) %>%
+    
+    #Gather stats into key-value pairs
+    gather(
+        key = "Attribute",
+        value = "Value",
+        -Tournament,
+        -Season,
+        -TeamID
+    ) %>%
+    
+    #Group and compute summaries
+    group_by(
+        Tournament,
+        Season,
+        TeamID,
+        Attribute
+    ) %>%
+    summarise(
+        Average = mean(Value),
+        Median = median(Value),
+        SD = sd(Value)
     )
 
 #Set up data set to answer "What is the probability the high (better) seed beats the low (worse) seed"?
@@ -96,7 +236,7 @@ dat$NCAATourneyCompactResults %>%
     ) %>%
     
     #Change to higher (H) vs. lower seed (L)
-    mutate(
+    transmute(
         Tournament,
         Season,
         DayNum,
@@ -134,4 +274,6 @@ dat$NCAATourneyCompactResults %>%
                 WSeed <= LSeed ~ LSeed,
                 TRUE ~ WSeed
             )
-    )
+    ) 
+
+#Get regular season 
