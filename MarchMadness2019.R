@@ -3,7 +3,7 @@
 #Description: March madness Kaggle competition 2019
 
 #Load packages
-require(tidyverse)
+require(tidyverse); require(randomForest)
 
 #Path to MM data sets
 path <- rstudioapi::selectDirectory("Find directory containing data files.")
@@ -71,8 +71,9 @@ teams_reg_season <-
     select(-key, -DayNum) %>%
     distinct()
 
-#Join to get stats when team is winning
-teams_reg_season %>%
+#Get all stats and summarise over the season
+teams_reg_season <- 
+    teams_reg_season %>%
     inner_join(
         y = 
             dat$RegularSeasonDetailedResults %>%
@@ -182,9 +183,47 @@ teams_reg_season %>%
         Attribute
     ) %>%
     summarise(
-        Average = mean(Value),
-        Median = median(Value),
-        SD = sd(Value)
+        Average = mean(Value, na.rm = TRUE)
+    ) %>%
+    ungroup() %>%
+    
+    #Make an indicator for team vs. opponent attribute
+    mutate(
+        Whose =
+            case_when(
+                str_detect(Attribute, "^O") & nchar(Attribute) > 2 ~ "Opponent",
+                TRUE ~ "Team"
+            ),
+        Attribute = 
+            case_when(
+                Whose == "Opponent" ~ str_remove(Attribute, "^O"),
+                TRUE ~ Attribute
+            )
+    ) %>%
+    
+    #Spread averages to columns for team vs. opponent
+    spread(
+        key = Whose,
+        value = Average
+    ) %>%
+    
+    #Compute the difference in each measure
+    transmute(
+        Tournament,
+        Season,
+        TeamID,
+        Attribute,
+        Value =
+            case_when(
+                is.na(Opponent) ~ Team,
+                TRUE ~ Team - Opponent
+            )
+    ) %>% 
+    
+    #Now spread attributes back to columns
+    spread(
+        key = Attribute,
+        value = Value
     )
 
 #Set up data set to answer "What is the probability the high (better) seed beats the low (worse) seed"?
@@ -220,7 +259,7 @@ dat$NCAATourneyCompactResults %>%
             )
     ) %>%
     
-    #Extract the region
+    #Extract the seed number
     mutate_at(
         vars(
             matches("Seed$")
@@ -242,38 +281,145 @@ dat$NCAATourneyCompactResults %>%
         DayNum,
         
         #Rearrange columns
-        TeamH = 
+        Team_H = 
             case_when(
                 WSeed <= LSeed ~ WTeamID,
                 TRUE ~ LTeamID
             ),
-        TeamL = 
+        Team_L = 
             case_when(
                 WSeed <= LSeed ~ LTeamID,
                 TRUE ~ WTeamID
             ),
         
-        ScoreH = 
+        Score_H = 
             case_when(
                 WSeed <= LSeed ~ WScore,
                 TRUE ~ LScore
             ),
-        ScoreL = 
+        Score_L = 
             case_when(
                 WSeed <= LSeed ~ LScore,
                 TRUE ~ WScore
             ),
         
-        SeedH = 
+        Seed_H = 
             case_when(
                 WSeed <= LSeed ~ WSeed,
                 TRUE ~ LSeed
             ),
-        SeedL = 
+        Seed_L = 
             case_when(
                 WSeed <= LSeed ~ LSeed,
                 TRUE ~ WSeed
             )
-    ) 
-
-#Get regular season 
+    ) %>%
+    group_by(Tournament) %>%
+    
+    #Define outcomes
+    mutate(
+        Differential = scale(Score_H - Score_L),
+        HWins = Score_H > Score_L
+    ) %>%
+    select(
+        -Score_H,
+        -Score_L
+    ) %>%
+    ungroup() %>%
+    
+    #Get regular season stats
+    inner_join(
+        y = teams_reg_season,
+        by =
+            c(
+                "Tournament",
+                "Season",
+                "Team_H" = "TeamID"
+            )
+    ) %>%
+    inner_join(
+        y = teams_reg_season,
+        by =
+            c(
+                "Tournament",
+                "Season",
+                "Team_L" = "TeamID"
+            ),
+        suffix = c("_H", "_L")
+    ) %>%
+    
+    #Add a index to keep track of games
+    add_column(
+        Index = 1:nrow(.)
+    ) %>%
+    select(
+        Index,
+        everything()
+    ) %>%
+    
+    #Gather all statistics to key-value pairs
+    gather(
+        key = "Attribute",
+        value = "Value",
+        -Index,
+        -Tournament,
+        -Season,
+        -DayNum,
+        -Team_H,
+        -Team_L,
+        -Differential,
+        -HWins
+    ) %>%
+    
+    #Extract tail from attribute
+    separate(
+        Attribute,
+        into = c("Attribute", "Whose")
+    ) %>%
+    
+    #Spread to columns
+    spread(
+        key = Whose,
+        value = Value
+    ) %>%
+    
+    #Compute difference in attributes
+    mutate(
+        Value = H - L
+    ) %>%
+    select(
+        -H, -L
+    ) %>%
+    
+    #Send attributes back to columns
+    spread(
+        key = Attribute,
+        value = Value
+    ) %>%
+    
+    #Remove some variables
+    select(
+        -Index,
+        -DayNum,
+        -FGA,
+        -FGM,
+        -FTA,
+        -FTM,
+        -PointDifferential,
+        -TO,
+        -Score
+    ) %>%
+    
+    ####Build models for mens and womens separately
+    split(.$Tournament) %>%
+    map(
+        function(.d) {
+            
+            #####Random forest
+            #Differntial
+            head(.d)
+            
+        }
+    )
+    
+    
