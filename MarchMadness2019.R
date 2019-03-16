@@ -6,7 +6,7 @@
 require(tidyverse)
 
 #Path to MM data sets
-path = "/Users/alexzajichek/Data/MarchMadness2019/"
+path <- rstudioapi::selectDirectory("Find directory containing data files.")
 
 #Combine into a list
 dat <-
