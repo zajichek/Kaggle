@@ -48,6 +48,15 @@ dat <-
         .id = "Tournament"
     )
 
+#Extract the seed number
+dat$NCAATourneySeeds <-
+    dat$NCAATourneySeeds %>%
+    mutate(Seed =
+               as.numeric(
+                   str_extract(Seed, pattern = "[0-9]{1,2}")
+               )
+    )
+
 #####Make a lookup table of regular season statistics for each team
 #Get a frame of unique teams per season
 teams_reg_season <- 
@@ -227,7 +236,34 @@ teams_reg_season <-
     )
 
 #Set up data set to answer "What is the probability the high (better) seed beats the low (worse) seed"?
+set.seed(123)
 dat$NCAATourneyCompactResults %>%
+    
+    #Bind with all possible match-ups for 2019
+    bind_rows(
+        dat$NCAATourneySeeds %>%
+            
+            #Extract 2019 teams
+            filter(Season == 2019) %>%
+            
+            #Split and apply by mens/womens
+            split(.$Tournament) %>%
+            
+            map_df(
+                ~
+                    .x %>%
+                    pull(TeamID) %>%
+                    combn(2) %>%
+                    t() %>%
+                    as_tibble() %>%
+                    transmute(
+                        Season = 2019,
+                        WTeamID = V1,
+                        LTeamID = V2
+                    ),
+                .id = "Tournament"
+            )
+    ) %>%
     
     #Winning team seeds
     inner_join(
@@ -257,21 +293,6 @@ dat$NCAATourneyCompactResults %>%
                 "Season",
                 "LTeamID"
             )
-    ) %>%
-    
-    #Extract the seed number
-    mutate_at(
-        vars(
-            matches("Seed$")
-        ),
-        funs(
-            as.numeric(
-                str_extract(
-                    .,
-                    pattern = "[0-9]{1,2}"
-                )
-            )
-        )
     ) %>%
     
     #Change to higher (H) vs. lower seed (L)
@@ -412,14 +433,222 @@ dat$NCAATourneyCompactResults %>%
     
     ####Build models for mens and womens separately
     split(.$Tournament) %>%
-    map(
-        function(.d) {
+    imap(
+        function(.d, .tournament) {
             
-            #####Random forest
-            #Differntial
-            head(.d)
+            #1) Separate out 2019 data
+            dat_train <- 
+                .d %>%
+                filter(Season != 2019) %>%
+                select(
+                    -Tournament,
+                    -Team_H,
+                    -Team_L
+                )
             
+            #2) 10-fold cross validation
+            caret::createFolds(1:nrow(dat_train)) %>%
+                
+                #Repeat for each fold
+                map_df(
+                    function(.fold_i) {
+                        
+                        #Make train/test set
+                        train_i <- dat_train[-.fold_i,]
+                        test_i <- dat_train[.fold_i,]
+                        
+                        #Run a model for each combination of mtry/nodesize
+                        list(
+                            mtry = c(1, sqrt(ncol(train) - 2), (ncol(train) - 2)/3, ncol(train) - 2),
+                            nodesize = c(1, 3)
+                        ) %>%
+                            
+                            #Get each combination
+                            cross() %>%
+                            
+                            #Run model
+                            map_df(
+                                function(.params_j) {
+                                    
+                                    ##(a) Run models
+                                    #Continous outcome
+                                    mod1 <- 
+                                        randomForest(
+                                            Differential ~ .,
+                                            data = train_i %>% select(-HWins),
+                                            mtry = .params_j$mtry,
+                                            nodesize = .params_j$nodesize,
+                                            ntree = 500
+                                        )
+                                    
+                                    #Binary outcome
+                                    mod2 <-
+                                        randomForest(
+                                            factor(HWins) ~ .,
+                                            data = train_i %>% select(-Differential),
+                                            mtry = .params_j$mtry,
+                                            nodesize = .params_j$nodesize,
+                                            ntree = 500
+                                        )
+                                    
+                                    #(b) Get predictions
+                                    pred1 <- predict(mod1, newdata = test_i) %>% unname()
+                                    pred1 <- 1/(1 + exp(-pred1))
+                                    pred2 <- predict(mod2, newdata = test_i, type = "prob")[,2]
+                                    
+                                    #Compute log-loss
+                                    actual <- test_i %>% pull(HWins)
+                                    
+                                    
+                                    #Make a tibble
+                                    tibble(
+                                        mtry = .params_j$mtry,
+                                        nodesize = .params_j$nodesize,
+                                        Continuous = -1*mean(actual*log(pred1) + (1-actual)*log(1-pred1)),
+                                        Binary = -1*mean(actual*log(pred2) + (1-actual)*log(1-pred2))
+                                    )
+                                    
+                                }
+                            )
+                    },
+                    .id = "Fold"
+                ) %>%
+                
+                #Average over the folds
+                group_by(
+                    mtry,
+                    nodesize
+                ) %>%
+                summarise(
+                    Continuous = mean(Continuous, na.rm = TRUE),
+                    Binary = mean(Binary, na.rm = TRUE)
+                ) %>% 
+                ungroup() %>%
+                
+                #Get best set of hyperparameters for each model
+                gather(
+                    key = "Response",
+                    value = "LogLoss",
+                    -mtry,
+                    -nodesize
+                ) %>%
+                group_by(
+                    Response
+                ) %>%
+                
+                #Find top 1
+                top_n(1, LogLoss) %>%
+                
+                #3) Run a final model for each response type
+                split(.$Response) %>%
+                
+                imap(
+                    function(.rf_params, .response) {
+                        
+                        #Get prediction data
+                        pred_dat <-
+                            .d %>%
+                            filter(Season == 2019)
+                        
+                        #Check which model
+                        if(.response == "Continuous") {
+                            
+                            pred <- 
+                                predict(
+                                    randomForest(
+                                        Differential ~ .,
+                                        data = dat_train %>% select(-HWins),
+                                        ntree = 10000,
+                                        nodesize = .rf_params$nodesize[1],
+                                        mtry = .rf_params$mtry[1]
+                                    ),
+                                    newdata = pred_dat
+                                ) %>% unname()
+                            pred <- 1/(1 + exp(-pred))
+                                
+                            
+                        } else {
+                            
+                            pred <- 
+                                predict(
+                                    randomForest(
+                                        factor(HWins) ~ .,
+                                        data = dat_train %>% select(-Differential),
+                                        ntree = 10000,
+                                        nodesize = .rf_params$nodesize[1],
+                                        mtry = .rf_params$mtry[1]
+                                    ),
+                                    newdata = pred_dat,
+                                    type = "prob"
+                                )[,2] %>% unname()
+                        }
+                        
+                        pred_dat %>%
+                            select(
+                                Season,
+                                Team_H,
+                                Team_L
+                            ) %>%
+                        bind_cols(
+                            Pred = pred
+                        )
+                    }
+                ) %>%
+                bind_rows(
+                    .id = "Response"
+                ) %>%
+                
+                #Make data correct for Kaggle submission
+                transmute(
+                    Season,
+                    T1 =
+                        case_when(
+                            Team_H < Team_L ~ Team_H,
+                            TRUE ~ Team_L
+                        ),
+                    T2 = 
+                        case_when(
+                            Team_H < Team_L ~ Team_L,
+                            TRUE ~ Team_H
+                        ),
+                    Pred = 
+                        case_when(
+                            Team_H < Team_L ~ Pred,
+                            TRUE ~ 1 - Pred
+                        ),
+                    Response
+                ) %>%
+                
+                #Arrange by teams
+                arrange(
+                    T1,
+                    T2
+                ) %>%
+                
+                #Concatenate columns
+                unite(
+                    col = ID,
+                    Season,
+                    T1,
+                    T2
+                ) %>%
+                
+                #Split by the model response
+                split(.$Response) %>%
+                
+                #Write a csv for each model
+                imap(
+                    function(.frame, .outcome) {
+                        .frame %>%
+                            select(
+                                -Response
+                            ) %>%
+                            write_csv(
+                                path = str_c(path, "/MarchMadness2019_", .outcome, "_", .tournament, "_", Sys.Date(), ".csv")
+                            )
+                    }
+                )
         }
     )
-    
-    
+
+
