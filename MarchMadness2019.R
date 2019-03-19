@@ -459,7 +459,7 @@ dat$NCAATourneyCompactResults %>%
                         
                         #Run a model for each combination of mtry/nodesize
                         list(
-                            mtry = c(1, sqrt(ncol(train) - 2), (ncol(train) - 2)/3, ncol(train) - 2),
+                            mtry = c(1, sqrt(ncol(train_i) - 2), (ncol(train_i) - 2)/3, ncol(train_i) - 2),
                             nodesize = c(1, 3)
                         ) %>%
                             
@@ -536,8 +536,8 @@ dat$NCAATourneyCompactResults %>%
                     Response
                 ) %>%
                 
-                #Find top 1
-                top_n(1, LogLoss) %>%
+                #Find best set of hyperparameters by logloss
+                top_n(-1, LogLoss) %>%
                 
                 #3) Run a final model for each response type
                 split(.$Response) %>%
@@ -642,7 +642,7 @@ dat$NCAATourneyCompactResults %>%
                         .frame %>%
                             select(
                                 -Response
-                            ) %>%
+                            )  %>%
                             write_csv(
                                 path = str_c(path, "/MarchMadness2019_", .outcome, "_", .tournament, "_", Sys.Date(), ".csv")
                             )
@@ -650,5 +650,4 @@ dat$NCAATourneyCompactResults %>%
                 )
         }
     )
-
 
